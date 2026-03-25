@@ -1,83 +1,75 @@
-# 1. Налаштування провайдера Google
-provider "google" {
-  project = "zubochistka"
-  region  = "europe-west3"
+# 1. Глобальні теги (Labels у GCP)
+locals {
+  common_labels = {
+    owner   = var.surname
+    project = "lab3"
+    variant = var.variant
+  }
 }
 
-# 2. Створення VPC 
-resource "google_compute_network" "vpc_lab3" {
-  name                    = "vpc-veluchko-vitalii-02"
+# 2. Virtual Private Cloud
+resource "google_compute_network" "main_vpc" {
+  name                    = "vpc-${var.surname}-${var.variant}"
   auto_create_subnetworks = false
 }
 
-# 3. Створення підмережі 
+# 3. Підмережі у різних зонах (згідно з варіантом 10.2.10.0 та 10.2.20.0)
 resource "google_compute_subnetwork" "subnet_a" {
-  name          = "subnet-a-veluchko-vitalii-02"
-  ip_cidr_range = "10.2.10.0/24"
-  region        = "europe-west3"
-  network       = google_compute_network.vpc_lab3.id
+  name          = "subnet-a-${var.variant}"
+  ip_cidr_range = var.subnet_a_cidr # 10.2.10.0/24
+  region        = var.region
+  network       = google_compute_network.main_vpc.id
 }
 
-# 4. Налаштування Firewall 
-resource "google_compute_firewall" "allow_ssh_web" {
-  name    = "fw-allow-ssh-web-8081"
-  network = google_compute_network.vpc_lab3.name
+resource "google_compute_subnetwork" "subnet_b" {
+  name          = "subnet-b-${var.variant}"
+  ip_cidr_range = var.subnet_b_cidr # 10.2.20.0/24
+  region        = var.region
+  network       = google_compute_network.main_vpc.id
+}
 
+# 4. Налаштування безпеки (Firewall)
+resource "google_compute_firewall" "web_firewall" {
+  name    = "fw-allow-web-${var.variant}"
+  network = google_compute_network.main_vpc.name
   allow {
     protocol = "tcp"
-    ports    = ["22", "8081"]
+    ports    = ["22", "${var.web_port}"] # SSH та порт 8081
   }
-
   source_ranges = ["0.0.0.0/0"]
 }
 
-# 5. Віртуальна машина 
-resource "google_compute_instance" "vm_lab3" {
-  name         = "vm-veluchko-vitalii-02"
+# 5. Динамічний пошук образу (Ubuntu 24.04 LTS)
+data "google_compute_image" "ubuntu_2404" {
+  family  = "ubuntu-2404-lts-amd64"
+  project = "ubuntu-os-cloud"
+}
+
+# 6. Розгортання інстансу ВМ
+resource "google_compute_instance" "web_server" {
+  name         = "vm-${var.surname}-${var.variant}"
   machine_type = "e2-micro"
-  zone         = "europe-west3-a"
+  zone         = var.zone_a
 
   boot_disk {
     initialize_params {
-      image = "ubuntu-os-cloud/ubuntu-2204-lts"
+      image = data.google_compute_image.ubuntu_2404.self_link
     }
   }
 
   network_interface {
-    network    = google_compute_network.vpc_lab3.name
-    subnetwork = google_compute_subnetwork.subnet_a.name
-    access_config {} 
+    subnetwork = google_compute_subnetwork.subnet_a.id
+    access_config {} # Надає зовнішню IP (Аналог Internet Gateway)
   }
 
-  metadata_startup_script = <<-EOF
-    #!/bin/bash
-    apt-get update
-    apt-get install -y apache2
-    mkdir -p /var/www/site_02
-    echo "<h1>Lab 3 - Terraform - Vitalii Veluchko - Variant 02</h1>" > /var/www/site_02/index.html
-    sed -i 's/Listen 80/Listen 8081/' /etc/apache2/ports.conf
-    printf "<VirtualHost *:8081>\n  ServerName var2.local\n  DocumentRoot /var/www/site_02\n  <Directory /var/www/site_02>\n    Require all granted\n  </Directory>\n</VirtualHost>" > /etc/apache2/sites-available/000-default.conf
-    systemctl restart apache2
-  EOF
+  # 7. Передача скрипта ініціалізації через templatefile (Крок 3.5)
+  metadata_startup_script = templatefile("bootstrap.sh", {
+    variant      = var.variant,
+    student_name = "${var.name} ${var.surname}",
+    port         = var.web_port,
+    server_name  = "var2.local",
+    doc_root     = "/var/www/site_02"
+  })
 
-  labels = {
-    surname = "veluchko"
-    name    = "vitalii"
-    variant = "02"
-  }
-}
-
-# 8. Вихідні дані (Outputs)
-output "vm_name" {
-  value = google_compute_instance.vm_lab3.name
-}
-
-output "vm_external_ip" {
-  # Використовуємо nat_ip замість assigned_external_ip
-  value = google_compute_instance.vm_lab3.network_interface[0].access_config[0].nat_ip
-}
-
-output "service_url" {
-  # Використовуємо nat_ip для формування посилання
-  value = "http://${google_compute_instance.vm_lab3.network_interface[0].access_config[0].nat_ip}:8081"
+  labels = local.common_labels
 }
